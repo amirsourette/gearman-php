@@ -29,6 +29,7 @@ use Kicken\Gearman\Exception\LostConnectionException;
 use Kicken\Gearman\Exception\NoRegisteredFunctionException;
 use Kicken\Gearman\Job\JobDetails;
 use Kicken\Gearman\Job\WorkerJob;
+use Kicken\Gearman\Network\ServerPoolInterface;
 use Kicken\Gearman\Protocol\Connection;
 use Kicken\Gearman\Protocol\Packet;
 use Kicken\Gearman\Protocol\PacketMagic;
@@ -41,9 +42,9 @@ use Kicken\Gearman\Protocol\PacketType;
  */
 class Worker {
     /**
-     * @var Connection
+     * @var ServerPoolInterface
      */
-    private $connection;
+    private $serverPool;
 
     /**
      * @var callable[]
@@ -68,18 +69,11 @@ class Worker {
     /**
      * Create a new Gearman Worker to process jobs submitted to the server by clients.
      *
-     * @param string|array|Connection $connection The server(s) to connect to.
+     * @param ServerPoolInterface $serverPool
      */
-    public function __construct($connection = '127.0.0.1:4730'){
-        if (!($connection instanceof Connection)){
-            if (!is_array($connection)){
-                $connection = [$connection];
-            }
-
-            $connection = new Connection($connection);
-        }
-
-        $this->connection = $connection;
+    public function __construct(ServerPoolInterface $serverPool){
+        $this->serverPool = $serverPool;
+        $this->serverPool->setPacketHandler([$this, 'serverPacketHandler']);
     }
 
     /**
@@ -87,11 +81,11 @@ class Worker {
      *
      * @param string $name The name of the function.
      * @param callable $callback A callback to be executed when a job is received.
-     * @param int|null $timeout A time limit on how the server should wait for a response.
+     * @param ?int $timeout A time limit on how the server should wait for a response.
      *
      * @return $this
      */
-    public function registerFunction($name, callable $callback, $timeout = null){
+    public function registerFunction(string $name, callable $callback, ?int $timeout = null){
         $this->workerList[$name] = $callback;
 
         if ($timeout === null){
@@ -100,20 +94,12 @@ class Worker {
             $packet = new Packet(PacketMagic::REQ, PacketType::CAN_DO_TIMEOUT, [$name, $timeout]);
         }
 
-        $this->connection->writePacket($packet, $this->timeout);
+        $this->serverPool->writePacket($packet);
 
         return $this;
     }
 
     public function workOnce(){
-        if (!$this->sleeping) {
-            $this->grabJob();
-        }
-
-        // Always process a new packet - this allows for new NOOP packets to
-        // wake the worker back up.
-        $packet = $this->connection->readPacket($this->timeout);
-        $this->processPacket($packet);
     }
 
     /**
@@ -125,7 +111,7 @@ class Worker {
         }
 
         while (!$this->stop){
-            $this->workOnce();
+            $this->serverPool->monitor();
         }
     }
 
